@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/ledgerwatch/erigon/rpc"
@@ -18,7 +19,8 @@ type requestBody struct {
 }
 
 const (
-	urlPath = "/health"
+	urlPath      = "/health"
+	healthHeader = "X-ERIGON-HEALTHCHECK"
 )
 
 var (
@@ -32,6 +34,18 @@ func ProcessHealthcheckIfNeeded(
 ) bool {
 	if !strings.EqualFold(r.URL.Path, urlPath) {
 		return false
+	}
+
+	header := r.Header.Get(healthHeader)
+	if header != "" {
+		err := ProcessHealthcheck2(w, r, rpcAPI)
+		if err != nil {
+			// health check failed if error
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		w.Write([]byte(errorStringOrOK(err)))
+
+		return true
 	}
 
 	netAPI, ethAPI := parseAPI(rpcAPI)
@@ -62,6 +76,62 @@ func ProcessHealthcheckIfNeeded(
 	}
 
 	return true
+}
+
+func ProcessHealthcheck2(
+	w http.ResponseWriter,
+	r *http.Request,
+	rpcAPI []rpc.API) error {
+	netAPI, ethAPI := parseAPI(rpcAPI)
+	headers := r.Header.Values(healthHeader)
+	for _, header := range headers {
+		header = strings.ToLower(header)
+		if header == "synced" {
+			err := processSyncedCheck(w, r, rpcAPI)
+			if err != nil {
+				return err
+			}
+		}
+		if strings.HasPrefix(header, "check_block") {
+			blockNumber, err := strconv.Atoi(strings.TrimPrefix(header, "check_block"))
+			if err != nil {
+				return err
+			}
+			err = checkBlockNumber(rpc.BlockNumber(blockNumber), ethAPI)
+			if err != nil {
+				return err
+			}
+		}
+		if strings.HasPrefix(header, "min_peer_count") {
+			minPeers, err := strconv.Atoi(strings.TrimPrefix(header, "min_peer_count"))
+			if err != nil {
+				return err
+			}
+			err = checkMinPeers(uint(minPeers), netAPI)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func processSyncedCheck(
+	w http.ResponseWriter,
+	r *http.Request,
+	rpcAPI []rpc.API,
+) error {
+	_, ethAPI := parseAPI(rpcAPI)
+
+	i, err := ethAPI.Syncing(r.Context())
+	if err != nil {
+		log.Root().Warn("unable to process synced request", "err", err.Error())
+		return err
+	}
+	if i == nil || i == false {
+		return nil
+	}
+	return errors.New("not synced")
 }
 
 func parseHealthCheckBody(reader io.Reader) (requestBody, error) {
