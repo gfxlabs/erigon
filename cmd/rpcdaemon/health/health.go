@@ -11,6 +11,7 @@ import (
 
 	"github.com/ledgerwatch/erigon/rpc"
 	"github.com/ledgerwatch/log/v3"
+	"github.com/tendermint/tendermint/types/time"
 )
 
 type requestBody struct {
@@ -112,6 +113,20 @@ func ProcessHealthcheck2(
 				return err
 			}
 		}
+		if strings.HasPrefix(header, "max_seconds_behind") {
+			secs, err := strconv.Atoi(strings.TrimPrefix(header, "max_seconds_behind"))
+			if err != nil {
+				return err
+			}
+			if secs < 0 {
+				secs = 600 // a somewhat sane default value
+			}
+			now := time.Now().Unix()
+			err = processTimeCheck(r, int(now)-secs, rpcAPI)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -132,6 +147,30 @@ func processSyncedCheck(
 		return nil
 	}
 	return errors.New("not synced")
+}
+
+func processTimeCheck(
+	r *http.Request,
+	seconds int,
+	rpcAPI []rpc.API,
+) error {
+	_, ethAPI := parseAPI(rpcAPI)
+
+	i, err := ethAPI.GetBlockByNumber(r.Context(), rpc.LatestBlockNumber, false)
+	if err != nil {
+		return err
+	}
+	timestamp := 0
+	if ts, ok := i["timestamp"]; ok {
+		if cs, ok := ts.(uint64); ok {
+			timestamp = int(cs)
+		}
+	}
+	if timestamp > seconds {
+		return fmt.Errorf("got ts: %d, need: %d", timestamp, seconds)
+	}
+
+	return nil
 }
 
 func parseHealthCheckBody(reader io.Reader) (requestBody, error) {
