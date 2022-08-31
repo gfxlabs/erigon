@@ -121,6 +121,10 @@ db-tools: git-submodules
 	cp libmdbx/mdbx_stat $(GOBIN)
 	@echo "Run \"$(GOBIN)/mdbx_stat -h\" to get info about mdbx db file."
 
+
+pprof:
+ "http://mainnet-2:6064/debug/pprof/"
+
 test:
 	$(GOTEST) --timeout 30s
 
