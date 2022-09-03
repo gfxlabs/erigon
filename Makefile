@@ -123,8 +123,14 @@ db-tools: git-submodules
 
 
 pprof:
- "http://mainnet-2:6064/debug/pprof/"
+	go tool pprof -edgefraction 1 -nodefraction 0 -nodecount 100000000 \
+		-http=0.0.0.0:18310 \
+		http://mainnet-2:6064/debug/pprof/allocs\?debug\=1
 
+pprofcpu:
+	go tool pprof -edgefraction 1 -nodefraction 0 -nodecount 100000000 \
+		-http=0.0.0.0:18310 \
+		http://mainnet-2:6064/debug/pprof/profile?seconds=300
 test:
 	$(GOTEST) --timeout 30s
 
