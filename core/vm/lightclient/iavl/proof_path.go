@@ -118,16 +118,17 @@ func (pl PathToLeaf) isRightmost() bool {
 }
 
 func (pl PathToLeaf) isEmpty() bool {
-	return pl == nil || len(pl) == 0
+	return len(pl) == 0
 }
 
 func (pl PathToLeaf) dropRoot() PathToLeaf {
 	if pl.isEmpty() {
 		return pl
 	}
-	return PathToLeaf(pl[:len(pl)-1])
+	return pl[:len(pl)-1]
 }
 
+// TODO: (leonard) unused linter complains these are unused methods
 func (pl PathToLeaf) hasCommonRoot(pl2 PathToLeaf) bool {
 	if pl.isEmpty() || pl2.isEmpty() {
 		return false

@@ -1,12 +1,12 @@
 package rpcdaemon
 
 import (
-	"github.com/ledgerwatch/erigon/cmd/rpcdaemon/cli/httpcfg"
 	"os"
 	"time"
 
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon/cmd/rpcdaemon/cli"
+	"github.com/ledgerwatch/erigon/cmd/rpcdaemon/cli/httpcfg"
 	"github.com/ledgerwatch/erigon/cmd/rpcdaemon/commands"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/spf13/cobra"
@@ -20,7 +20,7 @@ func RunDaemon() {
 		ctx := cmd.Context()
 		logger := log.New()
 		time.Sleep(100 * time.Millisecond)
-		db, borDb, backend, txPool, mining, starknet, stateCache, blockReader, ff, err := cli.RemoteServices(ctx, *cfg, logger, rootCancel)
+		db, borDb, backend, txPool, mining, stateCache, blockReader, ff, agg, txNums, err := cli.RemoteServices(ctx, *cfg, logger, rootCancel)
 		if err != nil {
 			log.Error("Could not connect to DB", "err", err)
 			return nil
@@ -30,8 +30,8 @@ func RunDaemon() {
 			defer borDb.Close()
 		}
 
-		apiList := commands.APIList(db, borDb, backend, txPool, mining, starknet, ff, stateCache, blockReader, *cfg)
-		if err := cli.StartRpcServer(ctx, *cfg, apiList); err != nil {
+		apiList := commands.APIList(db, borDb, backend, txPool, mining, ff, stateCache, blockReader, agg, txNums, *cfg)
+		if err := cli.StartRpcServer(ctx, *cfg, apiList, nil); err != nil {
 			log.Error(err.Error())
 			return nil
 		}

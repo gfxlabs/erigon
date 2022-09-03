@@ -24,7 +24,6 @@ import (
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon/cmd/downloader/downloader/downloadercfg"
 	"github.com/ledgerwatch/erigon/cmd/downloader/trackers"
-	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/turbo/snapshotsync/snap"
 	"github.com/ledgerwatch/log/v3"
 	"golang.org/x/sync/semaphore"
@@ -43,7 +42,7 @@ func AllTorrentPaths(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var res []string
+	res := make([]string, 0, len(files))
 	for _, f := range files {
 		torrentFilePath := filepath.Join(dir, f)
 		res = append(res, torrentFilePath)
@@ -56,7 +55,7 @@ func AllTorrentFiles(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var res []string
+	res := make([]string, 0, len(files))
 	for _, f := range files {
 		if !snap.IsCorrectFileName(f.Name()) {
 			continue
@@ -80,7 +79,7 @@ func seedableSegmentFiles(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var res []string
+	res := make([]string, 0, len(files))
 	for _, f := range files {
 		if !snap.IsCorrectFileName(f.Name()) {
 			continue
@@ -310,6 +309,7 @@ func AddTorrentFile(torrentFilePath string, torrentClient *torrent.Client) (*tor
 		ts.ChunkSize = 0
 	}
 
+	ts.DisallowDataDownload = true
 	t, _, err := torrentClient.AddTorrentSpec(ts)
 	if err != nil {
 		return nil, err
@@ -325,10 +325,6 @@ func VerifyDtaFiles(ctx context.Context, snapDir string) error {
 	logEvery := time.NewTicker(5 * time.Second)
 	defer logEvery.Stop()
 
-	tmpSnapDir := filepath.Join(snapDir, "tmp") // snapshots are in sub-dir "tmp", if not fully downloaded
-	if common.FileExist(tmpSnapDir) {
-		snapDir = tmpSnapDir
-	}
 	files, err := AllTorrentPaths(snapDir)
 	if err != nil {
 		return err

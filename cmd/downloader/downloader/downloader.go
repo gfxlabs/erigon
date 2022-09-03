@@ -19,6 +19,7 @@ import (
 	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/log/v3"
 	mdbx2 "github.com/torquem-ch/mdbx-go/mdbx"
+	"go.uber.org/atomic"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -63,13 +64,10 @@ func New(cfg *downloadercfg.Cfg) (*Downloader, error) {
 	if common.FileExist(cfg.DataDir + "_tmp") { // migration from prev versions
 		_ = os.Rename(cfg.DataDir+"_tmp", filepath.Join(cfg.DataDir, "tmp")) // ignore error, because maybe they are on different drive, or target folder already created manually, all is fine
 	}
-	if !common.FileExist(filepath.Join(cfg.DataDir, "db")) && !HasSegFile(cfg.DataDir) { // it's ok to remove "datadir/snapshots/db" dir or add .seg files manually
-		cfg.DataDir = filepath.Join(cfg.DataDir, "tmp")
-	} else {
-		if err := copyFromTmp(cfg.DataDir); err != nil {
-			return nil, err
-		}
+	if err := moveFromTmp(cfg.DataDir); err != nil {
+		return nil, err
 	}
+
 	db, c, m, torrentClient, err := openClient(cfg.ClientConfig)
 	if err != nil {
 		return nil, fmt.Errorf("openClient: %w", err)
@@ -96,7 +94,10 @@ func New(cfg *downloadercfg.Cfg) (*Downloader, error) {
 
 		statsLock: &sync.RWMutex{},
 	}
-	return d, d.addSegments()
+	if err := d.addSegments(); err != nil {
+		return nil, err
+	}
+	return d, nil
 }
 
 func (d *Downloader) SnapDir() string {
@@ -105,21 +106,15 @@ func (d *Downloader) SnapDir() string {
 	return d.cfg.DataDir
 }
 
-func (d *Downloader) IsInitialSync() bool {
-	d.clientLock.RLock()
-	defer d.clientLock.RUnlock()
-	_, lastPart := filepath.Split(d.cfg.DataDir)
-	return lastPart == "tmp"
-}
-
 func (d *Downloader) ReCalcStats(interval time.Duration) {
+	//Call this methods outside of `statsLock` critical section, because they have own locks with contention
+	torrents := d.torrentClient.Torrents()
+	connStats := d.torrentClient.ConnStats()
+	peers := make(map[torrent.PeerID]struct{}, 16)
+
 	d.statsLock.Lock()
 	defer d.statsLock.Unlock()
 	prevStats, stats := d.stats, d.stats
-
-	peers := make(map[torrent.PeerID]struct{}, 16)
-	torrents := d.torrentClient.Torrents()
-	connStats := d.torrentClient.ConnStats()
 
 	stats.Completed = true
 	stats.BytesDownload = uint64(connStats.BytesReadUsefulIntendedData.Int64())
@@ -156,14 +151,10 @@ func (d *Downloader) ReCalcStats(interval time.Duration) {
 	stats.PeersUnique = int32(len(peers))
 	stats.FilesTotal = int32(len(torrents))
 
-	if !prevStats.Completed && stats.Completed {
-		d.onComplete()
-	}
-
 	d.stats = stats
 }
 
-func copyFromTmp(snapDir string) error {
+func moveFromTmp(snapDir string) error {
 	tmpDir := filepath.Join(snapDir, "tmp")
 	if !common.FileExist(tmpDir) {
 		return nil
@@ -191,55 +182,76 @@ func copyFromTmp(snapDir string) error {
 	return nil
 }
 
-// onComplete - only once - after download of all files fully done:
-// - closing torrent client, closing downloader db
-// - removing _tmp suffix from snapDir
-// - open new torrentClient and db
-func (d *Downloader) onComplete() {
-	snapDir, lastPart := filepath.Split(d.cfg.DataDir)
-	if lastPart != "tmp" {
-		return
+func (d *Downloader) verify() error {
+	total := 0
+	for _, t := range d.torrentClient.Torrents() {
+		select {
+		case <-t.GotInfo():
+			total += t.NumPieces()
+		default:
+			continue
+		}
 	}
+	logInterval := 20 * time.Second
+	logEvery := time.NewTicker(logInterval)
+	defer logEvery.Stop()
 
-	d.clientLock.Lock()
-	defer d.clientLock.Unlock()
+	wg := &sync.WaitGroup{}
+	j := atomic.NewInt64(0)
 
-	d.torrentClient.Close()
-	d.folder.Close()
-	d.pieceCompletionDB.Close()
-	d.db.Close()
+	for _, t := range d.torrentClient.Torrents() {
+		wg.Add(1)
+		go func(t *torrent.Torrent) {
+			defer wg.Done()
+			for i := 0; i < t.NumPieces(); i++ {
+				j.Inc()
+				t.Piece(i).VerifyData()
 
-	if err := copyFromTmp(snapDir); err != nil {
-		panic(err)
+				select {
+				case <-logEvery.C:
+					log.Info("[snapshots] Verifying", "progress", fmt.Sprintf("%.2f%%", 100*float64(j.Load())/float64(total)))
+				default:
+				}
+				//<-t.Complete.On()
+			}
+		}(t)
 	}
-	d.cfg.DataDir = snapDir
-	// fmt.Printf("alex1: %s\n", d.cfg.DataDir)
+	wg.Wait()
 
-	db, c, m, torrentClient, err := openClient(d.cfg.ClientConfig)
-	if err != nil {
-		panic(err)
-	}
-	d.db = db
-	d.pieceCompletionDB = c
-	d.folder = m
-	d.torrentClient = torrentClient
-	_ = d.addSegments()
+	return nil
 }
 
 func (d *Downloader) addSegments() error {
-	if err := BuildTorrentFilesIfNeed(context.Background(), d.cfg.DataDir); err != nil {
+	logEvery := time.NewTicker(20 * time.Second)
+	defer logEvery.Stop()
+	if err := BuildTorrentFilesIfNeed(context.Background(), d.SnapDir()); err != nil {
 		return err
 	}
-	files, err := seedableSegmentFiles(d.cfg.DataDir)
+	files, err := seedableSegmentFiles(d.SnapDir())
 	if err != nil {
 		return fmt.Errorf("seedableSegmentFiles: %w", err)
 	}
+	wg := &sync.WaitGroup{}
+	i := atomic.NewInt64(0)
 	for _, f := range files {
-		_, err := AddSegment(f, d.cfg.DataDir, d.torrentClient)
-		if err != nil {
-			return err
-		}
+		wg.Add(1)
+		go func(f string) {
+			defer wg.Done()
+			_, err := AddSegment(f, d.cfg.DataDir, d.torrentClient)
+			if err != nil {
+				log.Warn("[snapshots] AddSegment", "err", err)
+				return
+			}
+
+			i.Inc()
+			select {
+			case <-logEvery.C:
+				log.Info("[snpshots] initializing", "files", fmt.Sprintf("%s/%d", i.String(), len(files)))
+			default:
+			}
+		}(f)
 	}
+	wg.Wait()
 	return nil
 }
 
@@ -287,7 +299,7 @@ func openClient(cfg *torrent.ClientConfig) (db kv.RwDB, c storage.PieceCompletio
 	db, err = mdbx.NewMDBX(log.New()).
 		Flags(func(f uint) uint { return f | mdbx2.SafeNoSync }).
 		Label(kv.DownloaderDB).
-		WithTablessCfg(func(defaultBuckets kv.TableCfg) kv.TableCfg { return kv.DownloaderTablesCfg }).
+		WithTableCfg(func(defaultBuckets kv.TableCfg) kv.TableCfg { return kv.DownloaderTablesCfg }).
 		SyncPeriod(15 * time.Second).
 		Path(filepath.Join(snapDir, "db")).
 		Open()
@@ -300,7 +312,14 @@ func openClient(cfg *torrent.ClientConfig) (db kv.RwDB, c storage.PieceCompletio
 	}
 	m = storage.NewMMapWithCompletion(snapDir, c)
 	cfg.DefaultStorage = m
-	torrentClient, err = torrent.NewClient(cfg)
+
+	for retry := 0; retry < 5; retry++ {
+		torrentClient, err = torrent.NewClient(cfg)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("torrent.NewClient: %w", err)
 	}
@@ -325,12 +344,12 @@ func MainLoop(ctx context.Context, d *Downloader, silent bool) {
 				t.AllowDataDownload()
 				t.DownloadAll()
 				go func(t *torrent.Torrent) {
+					defer sem.Release(1)
 					//r := t.NewReader()
 					//r.SetReadahead(t.Length())
 					//_, _ = io.Copy(io.Discard, r) // enable streaming - it will prioritize sequential download
 
 					<-t.Complete.On()
-					sem.Release(1)
 				}(t)
 			}
 			time.Sleep(30 * time.Second)

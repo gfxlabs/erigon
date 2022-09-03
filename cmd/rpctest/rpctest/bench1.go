@@ -19,7 +19,9 @@ var routes map[string]string
 // but also can be used for comparing RPCDaemon with Geth
 // parameters:
 // needCompare - if false - doesn't call Erigon and doesn't compare responses
-// 		use false value - to generate vegeta files, it's faster but we can generate vegeta files for Geth and Erigon
+//
+//	use false value - to generate vegeta files, it's faster but we can generate vegeta files for Geth and Erigon
+//
 // fullTest - if false - then call only methods which RPCDaemon currently supports
 func Bench1(erigonURL, gethURL string, needCompare bool, fullTest bool, blockFrom uint64, blockTo uint64, recordFile string) {
 	setRoutes(erigonURL, gethURL)
@@ -55,7 +57,7 @@ func Bench1(erigonURL, gethURL string, needCompare bool, fullTest bool, blockFro
 	for bn := blockFrom; bn <= blockTo; bn++ {
 		reqGen.reqID++
 		var b EthBlockByNumber
-		res = reqGen.Erigon("eth_getBlockByNumber", reqGen.getBlockByNumber(bn), &b)
+		res = reqGen.Erigon("eth_getBlockByNumber", reqGen.getBlockByNumber(bn, true /* withTxs */), &b)
 		resultsCh <- res
 		if res.Err != nil {
 			fmt.Printf("Could not retrieve block (Erigon) %d: %v\n", bn, res.Err)
@@ -68,7 +70,7 @@ func Bench1(erigonURL, gethURL string, needCompare bool, fullTest bool, blockFro
 
 		if needCompare {
 			var bg EthBlockByNumber
-			res = reqGen.Geth("eth_getBlockByNumber", reqGen.getBlockByNumber(bn), &bg)
+			res = reqGen.Geth("eth_getBlockByNumber", reqGen.getBlockByNumber(bn, true /* withTxs */), &bg)
 			if res.Err != nil {
 				fmt.Printf("Could not retrieve block (geth) %d: %v\n", bn, res.Err)
 				return

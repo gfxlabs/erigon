@@ -189,6 +189,26 @@ func (s *Sync) StageState(stage stages.SyncStage, tx kv.Tx, db kv.RoDB) (*StageS
 	return &StageState{s, stage, blockNum}, nil
 }
 
+func (s *Sync) RunUnwind(db kv.RwDB, tx kv.RwTx) error {
+	if s.unwindPoint == nil {
+		return nil
+	}
+	for j := 0; j < len(s.unwindOrder); j++ {
+		if s.unwindOrder[j] == nil || s.unwindOrder[j].Disabled || s.unwindOrder[j].Unwind == nil {
+			continue
+		}
+		if err := s.unwindStage(false, s.unwindOrder[j], db, tx); err != nil {
+			return err
+		}
+	}
+	s.prevUnwindPoint = s.unwindPoint
+	s.unwindPoint = nil
+	s.badBlock = common.Hash{}
+	if err := s.SetCurrentStage(s.stages[0].ID); err != nil {
+		return err
+	}
+	return nil
+}
 func (s *Sync) Run(db kv.RwDB, tx kv.RwTx, firstCycle bool) error {
 	s.prevUnwindPoint = nil
 	s.timings = s.timings[:0]
@@ -234,6 +254,11 @@ func (s *Sync) Run(db kv.RwDB, tx kv.RwTx, firstCycle bool) error {
 
 		if err := s.runStage(stage, db, tx, firstCycle, badBlockUnwind); err != nil {
 			return err
+		}
+
+		if string(stage.ID) == debug.StopAfterStage() { // stop process for debugging reasons
+			log.Warn("STOP_AFTER_STAGE env flag forced to stop app")
+			return libcommon.ErrStopped
 		}
 
 		s.NextStage()

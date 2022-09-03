@@ -18,7 +18,6 @@ import (
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/eth/tracers"
-	"github.com/ledgerwatch/erigon/ethdb"
 	"github.com/ledgerwatch/erigon/internal/ethapi"
 	"github.com/ledgerwatch/erigon/rpc"
 	"github.com/ledgerwatch/erigon/turbo/rpchelper"
@@ -43,10 +42,16 @@ func (api *PrivateDebugAPIImpl) traceBlock(ctx context.Context, blockNrOrHash rp
 		return err
 	}
 	defer tx.Rollback()
-	var block *types.Block
-	if number, ok := blockNrOrHash.Number(); ok {
+	var (
+		block    *types.Block
+		number   rpc.BlockNumber
+		numberOk bool
+		hash     common.Hash
+		hashOk   bool
+	)
+	if number, numberOk = blockNrOrHash.Number(); numberOk {
 		block, err = api.blockByRPCNumber(number, tx)
-	} else if hash, ok := blockNrOrHash.Hash(); ok {
+	} else if hash, hashOk = blockNrOrHash.Hash(); hashOk {
 		block, err = api.blockByHashWithSenders(tx, hash)
 	} else {
 		return fmt.Errorf("invalid arguments; neither block nor hash specified")
@@ -57,15 +62,17 @@ func (api *PrivateDebugAPIImpl) traceBlock(ctx context.Context, blockNrOrHash rp
 		return err
 	}
 
+	if block == nil {
+		if numberOk {
+			return fmt.Errorf("invalid arguments; block with number %d not found", number)
+		}
+		return fmt.Errorf("invalid arguments; block with hash %x not found", hash)
+	}
+
 	chainConfig, err := api.chainConfig(tx)
 	if err != nil {
 		stream.WriteNil()
 		return err
-	}
-
-	contractHasTEVM := func(contractHash common.Hash) (bool, error) { return false, nil }
-	if api.TevmEnabled {
-		contractHasTEVM = ethdb.GetHasTEVM(tx)
 	}
 
 	getHeader := func(hash common.Hash, number uint64) *types.Header {
@@ -76,7 +83,7 @@ func (api *PrivateDebugAPIImpl) traceBlock(ctx context.Context, blockNrOrHash rp
 		return h
 	}
 
-	_, blockCtx, _, ibs, reader, err := transactions.ComputeTxEnv(ctx, block, chainConfig, getHeader, contractHasTEVM, ethash.NewFaker(), tx, block.Hash(), 0)
+	_, blockCtx, _, ibs, reader, err := transactions.ComputeTxEnv(ctx, block, chainConfig, getHeader, ethash.NewFaker(), tx, block.Hash(), 0)
 	if err != nil {
 		stream.WriteNil()
 		return err
@@ -123,16 +130,20 @@ func (api *PrivateDebugAPIImpl) TraceTransaction(ctx context.Context, hash commo
 	// Retrieve the transaction and assemble its EVM context
 	blockNum, ok, err := api.txnLookup(ctx, tx, hash)
 	if err != nil {
+		stream.WriteNil()
 		return err
 	}
 	if !ok {
+		stream.WriteNil()
 		return nil
 	}
 	block, err := api.blockByNumberWithSenders(tx, blockNum)
 	if err != nil {
+		stream.WriteNil()
 		return err
 	}
 	if block == nil {
+		stream.WriteNil()
 		return nil
 	}
 	blockHash := block.Hash()
@@ -146,14 +157,15 @@ func (api *PrivateDebugAPIImpl) TraceTransaction(ctx context.Context, hash commo
 		}
 	}
 	if txn == nil {
-		var borTx *types.Transaction
+		var borTx types.Transaction
 		borTx, _, _, _, err = rawdb.ReadBorTransaction(tx, hash)
-
 		if err != nil {
+			stream.WriteNil()
 			return err
 		}
 
 		if borTx != nil {
+			stream.WriteNil()
 			return nil
 		}
 		stream.WriteNil()
@@ -168,11 +180,7 @@ func (api *PrivateDebugAPIImpl) TraceTransaction(ctx context.Context, hash commo
 	getHeader := func(hash common.Hash, number uint64) *types.Header {
 		return rawdb.ReadHeader(tx, hash, number)
 	}
-	contractHasTEVM := func(contractHash common.Hash) (bool, error) { return false, nil }
-	if api.TevmEnabled {
-		contractHasTEVM = ethdb.GetHasTEVM(tx)
-	}
-	msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnv(ctx, block, chainConfig, getHeader, contractHasTEVM, ethash.NewFaker(), tx, blockHash, txnIndex)
+	msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnv(ctx, block, chainConfig, getHeader, ethash.NewFaker(), tx, blockHash, txnIndex)
 	if err != nil {
 		stream.WriteNil()
 		return err
@@ -236,11 +244,7 @@ func (api *PrivateDebugAPIImpl) TraceCall(ctx context.Context, args ethapi.CallA
 		return err
 	}
 
-	contractHasTEVM := func(contractHash common.Hash) (bool, error) { return false, nil }
-	if api.TevmEnabled {
-		contractHasTEVM = ethdb.GetHasTEVM(dbtx)
-	}
-	blockCtx, txCtx := transactions.GetEvmContext(msg, header, blockNrOrHash.RequireCanonical, dbtx, contractHasTEVM, api._blockReader)
+	blockCtx, txCtx := transactions.GetEvmContext(msg, header, blockNrOrHash.RequireCanonical, dbtx, api._blockReader)
 	// Trace the transaction and return
 	return transactions.TraceTx(ctx, msg, blockCtx, txCtx, ibs, config, chainConfig, stream)
 }
@@ -332,12 +336,6 @@ func (api *PrivateDebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bun
 	signer := types.MakeSigner(chainConfig, blockNum)
 	rules := chainConfig.Rules(blockNum)
 
-	contractHasTEVM := func(contractHash common.Hash) (bool, error) { return false, nil }
-
-	if api.TevmEnabled {
-		contractHasTEVM = ethdb.GetHasTEVM(tx)
-	}
-
 	getHash := func(i uint64) common.Hash {
 		if hash, ok := overrideBlockHash[i]; ok {
 			return hash
@@ -354,16 +352,15 @@ func (api *PrivateDebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bun
 	}
 
 	blockCtx = vm.BlockContext{
-		CanTransfer:     core.CanTransfer,
-		Transfer:        core.Transfer,
-		GetHash:         getHash,
-		ContractHasTEVM: contractHasTEVM,
-		Coinbase:        parent.Coinbase,
-		BlockNumber:     parent.Number.Uint64(),
-		Time:            parent.Time,
-		Difficulty:      new(big.Int).Set(parent.Difficulty),
-		GasLimit:        parent.GasLimit,
-		BaseFee:         &baseFee,
+		CanTransfer: core.CanTransfer,
+		Transfer:    core.Transfer,
+		GetHash:     getHash,
+		Coinbase:    parent.Coinbase,
+		BlockNumber: parent.Number.Uint64(),
+		Time:        parent.Time,
+		Difficulty:  new(big.Int).Set(parent.Difficulty),
+		GasLimit:    parent.GasLimit,
+		BaseFee:     &baseFee,
 	}
 
 	evm = vm.NewEVM(blockCtx, txCtx, st, chainConfig, vm.Config{Debug: false})

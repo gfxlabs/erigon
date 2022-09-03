@@ -125,7 +125,7 @@ func (h *httpServer) start() error {
 	}
 
 	// Initialize the server.
-	h.server = &http.Server{Handler: h}
+	h.server = &http.Server{Handler: h} // nolint
 	if h.timeouts != (rpccfg.HTTPTimeouts{}) {
 		CheckTimeouts(&h.timeouts)
 		h.server.ReadTimeout = h.timeouts.ReadTimeout
@@ -265,7 +265,7 @@ func (h *httpServer) enableRPC(apis []rpc.API, config httpConfig, allowList rpc.
 	}
 
 	// Create RPC server and handler.
-	srv := rpc.NewServer(50, false /* traceRequests */)
+	srv := rpc.NewServer(50, false /* traceRequests */, true)
 	srv.SetAllowList(allowList)
 	if err := RegisterApisFromWhitelist(apis, config.Modules, srv, false); err != nil {
 		return err
@@ -298,7 +298,7 @@ func (h *httpServer) enableWS(apis []rpc.API, config wsConfig, allowList rpc.All
 	}
 
 	// Create RPC server and handler.
-	srv := rpc.NewServer(50, false /* traceRequests */)
+	srv := rpc.NewServer(50, false /* traceRequests */, true)
 	srv.SetAllowList(allowList)
 	if err := RegisterApisFromWhitelist(apis, config.Modules, srv, false); err != nil {
 		return err
@@ -309,18 +309,6 @@ func (h *httpServer) enableWS(apis []rpc.API, config wsConfig, allowList rpc.All
 		server:  srv,
 	})
 	return nil
-}
-
-// stopWS disables JSON-RPC over WebSocket and also stops the server if it only serves WebSocket.
-func (h *httpServer) stopWS() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.disableWS() {
-		if !h.rpcAllowed() {
-			h.doStop()
-		}
-	}
 }
 
 // disableWS disables the WebSocket handler. This is internal, the caller must hold h.mu.

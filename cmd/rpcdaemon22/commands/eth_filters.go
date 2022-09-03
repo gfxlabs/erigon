@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"time"
 
 	"github.com/ledgerwatch/erigon/common/debug"
 	"github.com/ledgerwatch/erigon/common/hexutil"
@@ -21,16 +20,8 @@ func (api *APIImpl) NewPendingTransactionFilter(_ context.Context) (string, erro
 	txsCh := make(chan []types.Transaction, 1)
 	id := api.filters.SubscribePendingTxs(txsCh)
 	go func() {
-		for {
-			select {
-			case txs, ok := <-txsCh:
-				if !ok {
-					return
-				}
-				api.filters.AddPendingTxs(id, txs)
-			default:
-				time.Sleep(time.Second)
-			}
+		for txs := range txsCh {
+			api.filters.AddPendingTxs(id, txs)
 		}
 	}()
 	return "0x" + string(id), nil
@@ -44,16 +35,8 @@ func (api *APIImpl) NewBlockFilter(_ context.Context) (string, error) {
 	ch := make(chan *types.Header, 1)
 	id := api.filters.SubscribeNewHeads(ch)
 	go func() {
-		for {
-			select {
-			case block, ok := <-ch:
-				if !ok {
-					return
-				}
-				api.filters.AddPendingBlock(id, block)
-			default:
-				time.Sleep(time.Second)
-			}
+		for block := range ch {
+			api.filters.AddPendingBlock(id, block)
 		}
 	}()
 	return "0x" + string(id), nil
@@ -67,16 +50,8 @@ func (api *APIImpl) NewFilter(_ context.Context, crit filters.FilterCriteria) (s
 	logs := make(chan *types.Log, 1)
 	id := api.filters.SubscribeLogs(logs, crit)
 	go func() {
-		for {
-			select {
-			case lg, ok := <-logs:
-				if !ok {
-					return
-				}
-				api.filters.AddLogs(id, lg)
-			default:
-				time.Sleep(time.Second)
-			}
+		for lg := range logs {
+			api.filters.AddLogs(id, lg)
 		}
 	}()
 	return hexutil.EncodeUint64(uint64(id)), nil
@@ -122,8 +97,8 @@ func (api *APIImpl) GetFilterChanges(_ context.Context, index string) ([]interfa
 		return stub, nil
 	}
 	if txs, ok := api.filters.ReadPendingTxs(rpchelper.PendingTxsSubID(cutIndex)); ok {
-		for _, v := range txs {
-			for _, tx := range v {
+		if len(txs) > 0 {
+			for _, tx := range txs[0] {
 				stub = append(stub, tx.Hash())
 			}
 			return stub, nil
@@ -158,16 +133,22 @@ func (api *APIImpl) NewHeads(ctx context.Context) (*rpc.Subscription, error) {
 	go func() {
 		defer debug.LogPanic()
 		headers := make(chan *types.Header, 1)
-		defer close(headers)
 		id := api.filters.SubscribeNewHeads(headers)
 		defer api.filters.UnsubscribeHeads(id)
 
 		for {
 			select {
-			case h := <-headers:
-				err := notifier.Notify(rpcSub.ID, h)
-				if err != nil {
-					log.Warn("error while notifying subscription", "err", err)
+			case h, ok := <-headers:
+				if h != nil {
+					err := notifier.Notify(rpcSub.ID, h)
+					if err != nil {
+						log.Warn("error while notifying subscription", "err", err)
+						return
+					}
+				}
+				if !ok {
+					log.Warn("new heads channel was closed")
+					return
 				}
 			case <-rpcSub.Err():
 				return
@@ -198,14 +179,19 @@ func (api *APIImpl) NewPendingTransactions(ctx context.Context) (*rpc.Subscripti
 
 		for {
 			select {
-			case txs := <-txsCh:
+			case txs, ok := <-txsCh:
 				for _, t := range txs {
 					if t != nil {
 						err := notifier.Notify(rpcSub.ID, t.Hash())
 						if err != nil {
 							log.Warn("error while notifying subscription", "err", err)
+							return
 						}
 					}
+				}
+				if !ok {
+					log.Warn("new pending transactions channel was closed")
+					return
 				}
 			case <-rpcSub.Err():
 				return
@@ -233,13 +219,19 @@ func (api *APIImpl) Logs(ctx context.Context, crit filters.FilterCriteria) (*rpc
 		logs := make(chan *types.Log, 1)
 		id := api.filters.SubscribeLogs(logs, crit)
 		defer api.filters.UnsubscribeLogs(id)
-
 		for {
 			select {
-			case h := <-logs:
-				err := notifier.Notify(rpcSub.ID, h)
-				if err != nil {
-					log.Warn("error while notifying subscription", "err", err)
+			case h, ok := <-logs:
+				if h != nil {
+					err := notifier.Notify(rpcSub.ID, h)
+					if err != nil {
+						log.Warn("error while notifying subscription", "err", err)
+						return
+					}
+				}
+				if !ok {
+					log.Warn("log channel was closed")
+					return
 				}
 			case <-rpcSub.Err():
 				return

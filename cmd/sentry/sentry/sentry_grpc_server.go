@@ -3,6 +3,7 @@ package sentry
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,8 +71,13 @@ func NewPeerInfo(peer *p2p.Peer, rw p2p.MsgReadWriter) *PeerInfo {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &PeerInfo{peer: peer, rw: rw, removed: make(chan struct{}), tasks: make(chan func(), 16), ctx: ctx, ctxCancel: cancel}
+
+	p.lock.RLock()
+	t := p.tasks
+	p.lock.RUnlock()
+
 	go func() { // each peer has own worker, then slow
-		for f := range p.tasks {
+		for f := range t {
 			f()
 		}
 	}()
@@ -357,6 +363,10 @@ func runPeer(
 			}
 			send(eth.ToProto[protocol][msg.Code], peerID, b)
 		case eth.GetNodeDataMsg:
+			if protocol >= eth.ETH67 {
+				msg.Discard()
+				return fmt.Errorf("unexpected GetNodeDataMsg from %s in eth/%d", peerID, protocol)
+			}
 			if !hasSubscribers(eth.ToProto[protocol][msg.Code]) {
 				continue
 			}
@@ -491,7 +501,7 @@ func NewGrpcServer(ctx context.Context, dialCandidates enode.Iterator, readNodeI
 		peersStreams: NewPeersStreams(),
 	}
 
-	if protocol != eth.ETH66 {
+	if protocol != eth.ETH66 && protocol != eth.ETH67 {
 		panic(fmt.Errorf("unexpected p2p protocol: %d", protocol))
 	}
 
@@ -502,11 +512,12 @@ func NewGrpcServer(ctx context.Context, dialCandidates enode.Iterator, readNodeI
 		DialCandidates: dialCandidates,
 		Run: func(peer *p2p.Peer, rw p2p.MsgReadWriter) error {
 			peerID := peer.Pubkey()
+			printablePeerID := hex.EncodeToString(peerID[:])[:20]
 			if ss.getPeer(peerID) != nil {
-				log.Trace(fmt.Sprintf("[%s] Peer already has connection", peerID))
+				log.Trace(fmt.Sprintf("[%s] Peer already has connection", printablePeerID))
 				return nil
 			}
-			log.Trace(fmt.Sprintf("[%s] Start with peer", peerID))
+			log.Trace(fmt.Sprintf("[%s] Start with peer", printablePeerID))
 
 			peerInfo := NewPeerInfo(peer, rw)
 			defer peerInfo.Close()
@@ -518,9 +529,9 @@ func NewGrpcServer(ctx context.Context, dialCandidates enode.Iterator, readNodeI
 				return ss.startSync(ctx, bestHash, peerID)
 			})
 			if err != nil {
-				return fmt.Errorf("handshake to peer %s: %w", peerID, err)
+				return fmt.Errorf("handshake to peer %s: %w", printablePeerID, err)
 			}
-			log.Trace(fmt.Sprintf("[%s] Received status message OK", peerID), "name", peer.Name())
+			log.Trace(fmt.Sprintf("[%s] Received status message OK", printablePeerID), "name", peer.Name())
 
 			err = runPeer(
 				ctx,
@@ -531,7 +542,7 @@ func NewGrpcServer(ctx context.Context, dialCandidates enode.Iterator, readNodeI
 				ss.send,
 				ss.hasSubscribers,
 			) // runPeer never returns a nil error
-			log.Trace(fmt.Sprintf("[%s] Error while running peer: %v", peerID, err))
+			log.Trace(fmt.Sprintf("[%s] Error while running peer: %v", printablePeerID, err))
 			ss.sendGonePeerToClients(gointerfaces.ConvertHashToH512(peerID))
 			return nil
 		},
@@ -631,9 +642,9 @@ func (ss *GrpcServer) writePeer(logPrefix string, peerInfo *PeerInfo, msgcode ui
 
 func (ss *GrpcServer) startSync(ctx context.Context, bestHash common.Hash, peerID [64]byte) error {
 	switch ss.Protocol.Version {
-	case eth.ETH66:
+	case eth.ETH66, eth.ETH67:
 		b, err := rlp.EncodeToBytes(&eth.GetBlockHeadersPacket66{
-			RequestId: rand.Uint64(),
+			RequestId: rand.Uint64(), // nolint: gosec
 			GetBlockHeadersPacket: &eth.GetBlockHeadersPacket{
 				Amount:  1,
 				Reverse: false,
@@ -805,6 +816,8 @@ func (ss *GrpcServer) HandShake(context.Context, *emptypb.Empty) (*proto_sentry.
 	switch ss.Protocol.Version {
 	case eth.ETH66:
 		reply.Protocol = proto_sentry.Protocol_ETH66
+	case eth.ETH67:
+		reply.Protocol = proto_sentry.Protocol_ETH67
 	}
 	return reply, nil
 }

@@ -60,7 +60,7 @@ func importChain(ctx *cli.Context) error {
 	stack := makeConfigNode(nodeCfg)
 	defer stack.Close()
 
-	ethereum, err := turboNode.RegisterEthService(stack, ethCfg, logger)
+	ethereum, err := eth.New(stack, ethCfg, logger)
 	if err != nil {
 		return err
 	}
@@ -154,7 +154,6 @@ func ImportChain(ethereum *eth.Ethereum, chainDB kv.RwDB, fn string) error {
 		missingChain := &core.ChainPack{
 			Blocks:   missing,
 			TopBlock: missing[len(missing)-1],
-			Length:   len(missing),
 		}
 
 		if err := InsertChain(ethereum, missingChain); err != nil {

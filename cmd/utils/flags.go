@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -30,15 +31,18 @@ import (
 	"text/template"
 
 	"github.com/c2h5oh/datasize"
+	"github.com/ledgerwatch/erigon-lib/common/cmp"
+	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcache"
 	"github.com/ledgerwatch/erigon-lib/txpool"
-	"github.com/ledgerwatch/erigon/cmd/downloader/downloader/downloadercfg"
-	"github.com/ledgerwatch/erigon/node/nodecfg"
-	"github.com/ledgerwatch/erigon/node/nodecfg/datadir"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/urfave/cli"
+
+	"github.com/ledgerwatch/erigon/cmd/downloader/downloader/downloadercfg"
+	"github.com/ledgerwatch/erigon/node/nodecfg"
+	"github.com/ledgerwatch/erigon/node/nodecfg/datadir"
 
 	"github.com/ledgerwatch/erigon/eth/protocols/eth"
 	"github.com/ledgerwatch/erigon/params/networkname"
@@ -319,15 +323,15 @@ var (
 		Usage: "HTTP-RPC server listening port",
 		Value: nodecfg.DefaultHTTPPort,
 	}
-	EngineAddr = cli.StringFlag{
-		Name:  "engine.addr",
-		Usage: "HTTP-RPC server listening interface for engineAPI",
+	AuthRpcAddr = cli.StringFlag{
+		Name:  "authrpc.addr",
+		Usage: "HTTP-RPC server listening interface for the Engine API",
 		Value: nodecfg.DefaultHTTPHost,
 	}
-	EnginePort = cli.UintFlag{
-		Name:  "engine.port",
-		Usage: "HTTP-RPC server listening port for the engineAPI",
-		Value: nodecfg.DefaultEngineHTTPPort,
+	AuthRpcPort = cli.UintFlag{
+		Name:  "authrpc.port",
+		Usage: "HTTP-RPC server listening port for the Engine API",
+		Value: nodecfg.DefaultAuthRpcPort,
 	}
 
 	JWTSecretPath = cli.StringFlag{
@@ -354,6 +358,11 @@ var (
 		Usage: "Comma separated list of virtual hostnames from which to accept requests (server enforced). Accepts '*' wildcard.",
 		Value: strings.Join(nodecfg.DefaultConfig.HTTPVirtualHosts, ","),
 	}
+	AuthRpcVirtualHostsFlag = cli.StringFlag{
+		Name:  "authrpc.vhosts",
+		Usage: "Comma separated list of virtual hostnames from which to accept Engine API requests (server enforced). Accepts '*' wildcard.",
+		Value: strings.Join(nodecfg.DefaultConfig.HTTPVirtualHosts, ","),
+	}
 	HTTPApiFlag = cli.StringFlag{
 		Name:  "http.api",
 		Usage: "API's offered over the HTTP-RPC interface",
@@ -364,6 +373,10 @@ var (
 		Usage: "Does limit amount of goroutines to process 1 batch request. Means 1 bach request can't overload server. 1 batch still can have unlimited amount of request",
 		Value: 2,
 	}
+	RpcStreamingDisableFlag = cli.BoolFlag{
+		Name:  "rpc.streaming.disable",
+		Usage: "Erigon has enalbed json streaming for some heavy endpoints (like trace_*). It's treadoff: greatly reduce amount of RAM (in some cases from 30GB to 30mb), but it produce invalid json format if error happened in the middle of streaming (because json is not streaming-friendly format)",
+	}
 	HTTPTraceFlag = cli.BoolFlag{
 		Name:  "http.trace",
 		Usage: "Trace HTTP requests with INFO level",
@@ -371,7 +384,7 @@ var (
 	DBReadConcurrencyFlag = cli.IntFlag{
 		Name:  "db.read.concurrency",
 		Usage: "Does limit amount of parallel db reads. Default: equal to GOMAXPROCS (or number of CPU)",
-		Value: runtime.GOMAXPROCS(-1),
+		Value: cmp.Max(10, runtime.GOMAXPROCS(-1)*2),
 	}
 	RpcAccessListFlag = cli.StringFlag{
 		Name:  "rpc.accessList",
@@ -388,17 +401,7 @@ var (
 		Usage: "Bug for bug compatibility with OE for trace_ routines",
 	}
 
-	StarknetGrpcAddressFlag = cli.StringFlag{
-		Name:  "starknet.grpc.address",
-		Usage: "Starknet GRPC address",
-		Value: "127.0.0.1:6066",
-	}
-
-	TevmFlag = cli.BoolFlag{
-		Name:  "experimental.tevm",
-		Usage: "Enables Transpiled EVM experiment",
-	}
-	MemoryOverlayFlag = cli.BoolFlag{
+	MemoryOverlayFlag = cli.BoolTFlag{
 		Name:  "experimental.overlay",
 		Usage: "Enables In-Memory Overlay for PoS",
 	}
@@ -499,6 +502,11 @@ var (
 		Name:  "port",
 		Usage: "Network listening port",
 		Value: 30303,
+	}
+	P2pProtocolVersionFlag = cli.IntFlag{
+		Name:  "p2p.protocol",
+		Usage: "Version of eth p2p protocol",
+		Value: int(nodecfg.DefaultConfig.P2P.ProtocolVersion),
 	}
 	SentryAddrFlag = cli.StringFlag{
 		Name:  "sentry.api.addr",
@@ -614,6 +622,10 @@ var (
 		Usage: "Metrics HTTP server listening port",
 		Value: metrics.DefaultConfig.Port,
 	}
+	HistoryV2Flag = cli.BoolFlag{
+		Name:  "history.v2",
+		Usage: "Can't change this flag after node creation. New DB and Snapshots format of history allows: parallel blocks execution, get state as of given transaction without executing whole block.",
+	}
 
 	CliqueSnapshotCheckpointIntervalFlag = cli.UintFlag{
 		Name:  "clique.checkpoint",
@@ -668,6 +680,10 @@ var (
 		Name:  "no-downloader",
 		Usage: "to disable downloader component",
 	}
+	DownloaderVerifyFlag = cli.BoolFlag{
+		Name:  "downloader.verify",
+		Usage: "verify snapshots on startup. it will not report founded problems but just re-download broken pieces",
+	}
 	TorrentPortFlag = cli.IntFlag{
 		Name:  "torrent.port",
 		Value: 42069,
@@ -685,8 +701,8 @@ var (
 	}
 	DbPageSizeFlag = cli.StringFlag{
 		Name:  "db.pagesize",
-		Usage: "set mdbx pagesize on db creation: must be power of 2 and '256b <= pagesize <= 64kb' ",
-		Value: "4kb",
+		Usage: "set mdbx pagesize on db creation: must be power of 2 and '256b <= pagesize <= 64kb'. default: equal to OperationSystem's pageSize",
+		Value: datasize.ByteSize(kv.DefaultPageSize()).String(),
 	}
 
 	HealthCheckFlag = cli.BoolFlag{
@@ -704,6 +720,12 @@ var (
 	WithoutHeimdallFlag = cli.BoolFlag{
 		Name:  "bor.withoutheimdall",
 		Usage: "Run without Heimdall service (for testing purpose)",
+	}
+
+	ConfigFlag = cli.StringFlag{
+		Name:  "config",
+		Usage: "Sets erigon flags from YAML/TOML file",
+		Value: "",
 	}
 )
 
@@ -824,7 +846,7 @@ func ParseNodesFromURLs(urls []string) ([]*enode.Node, error) {
 }
 
 // NewP2PConfig
-//  - doesn't setup bootnodes - they will set when genesisHash will know
+//   - doesn't setup bootnodes - they will set when genesisHash will know
 func NewP2PConfig(
 	nodiscover bool,
 	dirs datadir.Dirs,
@@ -842,6 +864,8 @@ func NewP2PConfig(
 	switch protocol {
 	case eth.ETH66:
 		enodeDBPath = filepath.Join(dirs.Nodes, "eth66")
+	case eth.ETH67:
+		enodeDBPath = filepath.Join(dirs.Nodes, "eth67")
 	default:
 		return nil, fmt.Errorf("unknown protocol: %v", protocol)
 	}
@@ -901,6 +925,9 @@ func nodeKey(datadir string) (*ecdsa.PrivateKey, error) {
 func setListenAddress(ctx *cli.Context, cfg *p2p.Config) {
 	if ctx.GlobalIsSet(ListenPortFlag.Name) {
 		cfg.ListenAddr = fmt.Sprintf(":%d", ctx.GlobalInt(ListenPortFlag.Name))
+	}
+	if ctx.GlobalIsSet(P2pProtocolVersionFlag.Name) {
+		cfg.ProtocolVersion = uint(ctx.GlobalInt(P2pProtocolVersionFlag.Name))
 	}
 	if ctx.GlobalIsSet(SentryAddrFlag.Name) {
 		cfg.SentryAddr = SplitAndTrim(ctx.GlobalString(SentryAddrFlag.Name))
@@ -1051,28 +1078,48 @@ func DataDirForNetwork(datadir string, network string) string {
 	case networkname.DevChainName:
 		return "" // unless explicitly requested, use memory databases
 	case networkname.RinkebyChainName:
-		return filepath.Join(datadir, "rinkeby")
+		return networkDataDirCheckingLegacy(datadir, "rinkeby")
 	case networkname.GoerliChainName:
-		filepath.Join(datadir, "goerli")
+		return networkDataDirCheckingLegacy(datadir, "goerli")
 	case networkname.KilnDevnetChainName:
-		filepath.Join(datadir, "kiln-devnet")
+		return networkDataDirCheckingLegacy(datadir, "kiln-devnet")
 	case networkname.SokolChainName:
-		return filepath.Join(datadir, "sokol")
+		return networkDataDirCheckingLegacy(datadir, "sokol")
 	case networkname.FermionChainName:
-		return filepath.Join(datadir, "fermion")
+		return networkDataDirCheckingLegacy(datadir, "fermion")
 	case networkname.MumbaiChainName:
-		return filepath.Join(datadir, "mumbai")
+		return networkDataDirCheckingLegacy(datadir, "mumbai")
 	case networkname.BorMainnetChainName:
-		return filepath.Join(datadir, "bor-mainnet")
+		return networkDataDirCheckingLegacy(datadir, "bor-mainnet")
 	case networkname.BorDevnetChainName:
-		return filepath.Join(datadir, "bor-devnet")
+		return networkDataDirCheckingLegacy(datadir, "bor-devnet")
 	case networkname.SepoliaChainName:
-		return filepath.Join(datadir, "sepolia")
+		return networkDataDirCheckingLegacy(datadir, "sepolia")
+	case networkname.GnosisChainName:
+		return networkDataDirCheckingLegacy(datadir, "gnosis")
+
 	default:
 		return datadir
 	}
+}
 
-	return datadir
+// networkDataDirCheckingLegacy checks if the datadir for the network already exists and uses that if found.
+// if not checks for a LOCK file at the root of the datadir and uses this if found
+// or by default assume a fresh node and to use the nested directory for the network
+func networkDataDirCheckingLegacy(datadir, network string) string {
+	anticipated := filepath.Join(datadir, network)
+
+	if _, err := os.Stat(anticipated); !os.IsNotExist(err) {
+		return anticipated
+	}
+
+	legacyLockFile := filepath.Join(datadir, "LOCK")
+	if _, err := os.Stat(legacyLockFile); !os.IsNotExist(err) {
+		log.Info("Using legacy datadir")
+		return datadir
+	}
+
+	return anticipated
 }
 
 func setDataDir(ctx *cli.Context, cfg *nodecfg.Config) {
@@ -1130,7 +1177,7 @@ func setGPO(ctx *cli.Context, cfg *gasprice.Config) {
 	}
 }
 
-//nolint
+// nolint
 func setGPOCobra(f *pflag.FlagSet, cfg *gasprice.Config) {
 	if v := f.Int(GpoBlocksFlag.Name, GpoBlocksFlag.Value, GpoBlocksFlag.Usage); v != nil {
 		cfg.Blocks = *v
@@ -1389,6 +1436,7 @@ func SetEthConfig(ctx *cli.Context, nodeConfig *nodecfg.Config, cfg *ethconfig.C
 	cfg.Snapshot.KeepBlocks = ctx.GlobalBool(SnapKeepBlocksFlag.Name)
 	cfg.Snapshot.Produce = !ctx.GlobalBool(SnapStopFlag.Name)
 	cfg.Snapshot.NoDownloader = ctx.GlobalBool(NoDownloaderFlag.Name)
+	cfg.Snapshot.Verify = ctx.GlobalBool(DownloaderVerifyFlag.Name)
 	cfg.Snapshot.DownloaderAddr = strings.TrimSpace(ctx.GlobalString(DownloaderAddrFlag.Name))
 	if cfg.Snapshot.DownloaderAddr == "" {
 		downloadRateStr := ctx.GlobalString(TorrentDownloadRateFlag.Name)
@@ -1400,11 +1448,11 @@ func SetEthConfig(ctx *cli.Context, nodeConfig *nodecfg.Config, cfg *ethconfig.C
 		if err := uploadRate.UnmarshalText([]byte(uploadRateStr)); err != nil {
 			panic(err)
 		}
-		log.Info("torrent verbosity", "level", ctx.GlobalInt(TorrentVerbosityFlag.Name))
 		lvl, dbg, err := downloadercfg.Int2LogLevel(ctx.GlobalInt(TorrentVerbosityFlag.Name))
 		if err != nil {
 			panic(err)
 		}
+		log.Info("torrent verbosity", "level", lvl.LogString())
 		cfg.Downloader, err = downloadercfg.New(cfg.Dirs.Snap, lvl, dbg, nodeConfig.P2P.NAT, downloadRate, uploadRate, ctx.GlobalInt(TorrentPortFlag.Name), ctx.GlobalInt(TorrentConnsPerFileFlag.Name), ctx.GlobalInt(TorrentDownloadSlotsFlag.Name))
 		if err != nil {
 			panic(err)
@@ -1435,6 +1483,7 @@ func SetEthConfig(ctx *cli.Context, nodeConfig *nodecfg.Config, cfg *ethconfig.C
 	cfg.Ethstats = ctx.GlobalString(EthStatsURLFlag.Name)
 	cfg.P2PEnabled = len(nodeConfig.P2P.SentryAddr) == 0
 	cfg.EnabledIssuance = ctx.GlobalIsSet(EnabledIssuance.Name)
+	cfg.HistoryV2 = ctx.GlobalIsSet(HistoryV2Flag.Name)
 	if ctx.GlobalIsSet(NetworkIdFlag.Name) {
 		cfg.NetworkID = ctx.GlobalUint64(NetworkIdFlag.Name)
 	}
@@ -1545,9 +1594,9 @@ func MakeConsolePreloads(ctx *cli.Context) []string {
 		return nil
 	}
 	// Otherwise resolve absolute paths and return them
-	var preloads []string
-
-	for _, file := range strings.Split(ctx.GlobalString(PreloadJSFlag.Name), ",") {
+	files := strings.Split(ctx.GlobalString(PreloadJSFlag.Name), ",")
+	preloads := make([]string, 0, len(files))
+	for _, file := range files {
 		preloads = append(preloads, strings.TrimSpace(file))
 	}
 	return preloads

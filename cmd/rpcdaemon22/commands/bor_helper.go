@@ -2,17 +2,18 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/consensus/bor"
-	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/crypto"
 	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/rpc"
+	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 )
 
 const (
@@ -44,7 +45,7 @@ var (
 
 // getHeaderByNumber returns a block's header given a block number ignoring the block's transaction and uncle list (may be faster).
 // derived from erigon_getHeaderByNumber implementation (see ./erigon_block.go)
-func getHeaderByNumber(number rpc.BlockNumber, api *BorImpl, tx kv.Tx) (*types.Header, error) {
+func getHeaderByNumber(ctx context.Context, number rpc.BlockNumber, api *BorImpl, tx kv.Tx) (*types.Header, error) {
 	// Pending block is only known by the miner
 	if number == rpc.PendingBlockNumber {
 		block := api.pendingBlock()
@@ -54,12 +55,15 @@ func getHeaderByNumber(number rpc.BlockNumber, api *BorImpl, tx kv.Tx) (*types.H
 		return block.Header(), nil
 	}
 
-	blockNum, err := getBlockNumber(number, tx)
+	blockNum, _, _, err := rpchelper.GetBlockNumber(rpc.BlockNumberOrHashWithNumber(number), tx, api.filters)
 	if err != nil {
 		return nil, err
 	}
 
-	header := rawdb.ReadHeaderByNumber(tx, blockNum)
+	header, err := api._blockReader.HeaderByNumber(ctx, tx, blockNum)
+	if err != nil {
+		return nil, err
+	}
 	if header == nil {
 		return nil, fmt.Errorf("block header not found: %d", blockNum)
 	}
@@ -69,8 +73,8 @@ func getHeaderByNumber(number rpc.BlockNumber, api *BorImpl, tx kv.Tx) (*types.H
 
 // getHeaderByHash returns a block's header given a block's hash.
 // derived from erigon_getHeaderByHash implementation (see ./erigon_block.go)
-func getHeaderByHash(tx kv.Tx, hash common.Hash) (*types.Header, error) {
-	header, err := rawdb.ReadHeaderByHash(tx, hash)
+func getHeaderByHash(ctx context.Context, api *BorImpl, tx kv.Tx, hash common.Hash) (*types.Header, error) {
+	header, err := api._blockReader.HeaderByHash(ctx, tx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +131,7 @@ func getUpdatedValidatorSet(oldValidatorSet *ValidatorSet, newVals []*bor.Valida
 	v := oldValidatorSet
 	oldVals := v.Validators
 
-	var changes []*bor.Validator
+	changes := make([]*bor.Validator, 0, len(oldVals))
 	for _, ov := range oldVals {
 		if f, ok := validatorContains(newVals, ov); ok {
 			ov.VotingPower = f.VotingPower

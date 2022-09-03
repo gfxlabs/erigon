@@ -118,10 +118,14 @@ func TestGetBlockReceipts(t *testing.T) {
 
 	expect, err := rlp.EncodeToBytes(eth.ReceiptsRLPPacket66{RequestId: 1, ReceiptsRLPPacket: receipts})
 	require.NoError(t, err)
-	m.ReceiveWg.Wait()
-	sent := m.SentMessage(0)
-	require.Equal(t, eth.ToProto[m.SentryClient.Protocol()][eth.ReceiptsMsg], sent.Id)
-	require.Equal(t, expect, sent.Data)
+	if m.HistoryV2 {
+		// GetReceiptsMsg disabled for historyV2
+	} else {
+		m.ReceiveWg.Wait()
+		sent := m.SentMessage(0)
+		require.Equal(t, eth.ToProto[m.SentryClient.Protocol()][eth.ReceiptsMsg], sent.Id)
+		require.Equal(t, expect, sent.Data)
+	}
 }
 
 // newTestBackend creates a chain with a number of explicitly defined blocks and
@@ -130,7 +134,7 @@ func mockWithGenerator(t *testing.T, blocks int, generator func(int, *core.Block
 	m := stages.MockWithGenesis(t, &core.Genesis{
 		Config: params.TestChainConfig,
 		Alloc:  core.GenesisAlloc{testAddr: {Balance: big.NewInt(1000000)}},
-	}, testKey)
+	}, testKey, false)
 	if blocks > 0 {
 		chain, _ := core.GenerateChain(m.ChainConfig, m.Genesis, m.Engine, m.DB, blocks, generator, true)
 		err := m.InsertChain(chain)

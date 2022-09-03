@@ -29,7 +29,8 @@ var (
 	pruneTBefore, pruneCBefore     uint64
 	experiments                    []string
 	chain                          string // Which chain to use (mainnet, ropsten, rinkeby, goerli, etc.)
-	snapshotsBool                  bool
+
+	_forceSetHistoryV2 bool
 )
 
 func must(err error) {
@@ -94,18 +95,17 @@ func withDataDir2(cmd *cobra.Command) {
 	must(cmd.MarkFlagDirname(utils.DataDirFlag.Name))
 	must(cmd.MarkFlagRequired(utils.DataDirFlag.Name))
 	cmd.Flags().IntVar(&databaseVerbosity, "database.verbosity", 2, "Enabling internal db logs. Very high verbosity levels may require recompile db. Default: 2, means warning.")
-	cmd.Flags().BoolVar(&snapshotsBool, "snapshots", true, utils.SnapshotFlag.Usage)
 }
 
 func withDataDir(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&datadirCli, "datadir", paths.DefaultDataDir(), "data directory for temporary ELT files")
+	must(cmd.MarkFlagRequired("datadir"))
 	must(cmd.MarkFlagDirname("datadir"))
 
 	cmd.Flags().StringVar(&chaindata, "chaindata", "", "path to the db")
 	must(cmd.MarkFlagDirname("chaindata"))
 
 	cmd.Flags().IntVar(&databaseVerbosity, "database.verbosity", 2, "Enabling internal db logs. Very high verbosity levels may require recompile db. Default: 2, means warning")
-	cmd.Flags().BoolVar(&snapshotsBool, "snapshots", true, utils.SnapshotFlag.Usage)
 }
 
 func withBatchSize(cmd *cobra.Command) {
@@ -126,7 +126,8 @@ func withTxTrace(cmd *cobra.Command) {
 }
 
 func withChain(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&chain, "chain", "", "pick a chain to assume (mainnet, ropsten, etc.)")
+	cmd.Flags().StringVar(&chain, "chain", "mainnet", "pick a chain to assume (mainnet, ropsten, etc.)")
+	must(cmd.MarkFlagRequired("chain"))
 }
 
 func withHeimdall(cmd *cobra.Command) {

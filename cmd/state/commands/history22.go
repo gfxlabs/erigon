@@ -25,6 +25,8 @@ import (
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/eth/ethconfig"
+	"github.com/ledgerwatch/erigon/eth/stagedsync"
+	datadir2 "github.com/ledgerwatch/erigon/node/nodecfg/datadir"
 	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/turbo/services"
 	"github.com/ledgerwatch/erigon/turbo/snapshotsync"
@@ -58,7 +60,8 @@ func History22(genesis *core.Genesis, logger log.Logger) error {
 		<-sigs
 		interruptCh <- true
 	}()
-	historyDb, err := kv2.NewMDBX(logger).Path(path.Join(datadir, "chaindata")).Open()
+	dirs := datadir2.New(datadir)
+	historyDb, err := kv2.NewMDBX(logger).Path(dirs.Chaindata).Open()
 	if err != nil {
 		return fmt.Errorf("opening chaindata as read only: %v", err)
 	}
@@ -70,7 +73,7 @@ func History22(genesis *core.Genesis, logger log.Logger) error {
 	}
 	defer historyTx.Rollback()
 	aggPath := filepath.Join(datadir, "erigon23")
-	h, err := libstate.NewAggregator(aggPath, AggregationStep)
+	h, err := libstate.NewAggregator(aggPath, stagedsync.AggregationStep)
 	if err != nil {
 		return fmt.Errorf("create history: %w", err)
 	}
@@ -103,7 +106,7 @@ func History22(genesis *core.Genesis, logger log.Logger) error {
 			return err
 		}
 	}
-	ri, err := libstate.NewReadIndices(readPath, AggregationStep)
+	ri, err := libstate.NewReadIndices(readPath, stagedsync.AggregationStep)
 	if err != nil {
 		return fmt.Errorf("create read indices: %w", err)
 	}
@@ -130,13 +133,13 @@ func History22(genesis *core.Genesis, logger log.Logger) error {
 	prevTime := time.Now()
 
 	var blockReader services.FullBlockReader
-	var allSnapshots *snapshotsync.RoSnapshots
-	allSnapshots = snapshotsync.NewRoSnapshots(ethconfig.NewSnapCfg(true, false, true), path.Join(datadir, "snapshots"))
+	allSnapshots := snapshotsync.NewRoSnapshots(ethconfig.NewSnapCfg(true, false, true), path.Join(datadir, "snapshots"))
 	defer allSnapshots.Close()
-	if err := allSnapshots.Reopen(); err != nil {
+	if err := allSnapshots.ReopenWithDB(db); err != nil {
 		return fmt.Errorf("reopen snapshot segments: %w", err)
 	}
 	blockReader = snapshotsync.NewBlockReaderWithSnapshots(allSnapshots)
+	readWrapper := state.NewHistoryReader23(h.MakeContext(), ri)
 
 	for !interrupt {
 		select {
@@ -170,12 +173,10 @@ func History22(genesis *core.Genesis, logger log.Logger) error {
 			txNum += uint64(len(b.Transactions())) + 2 // Pre and Post block transaction
 			continue
 		}
-		readWrapper := state.NewHistoryReader22(h, ri)
 		if traceBlock != 0 {
 			readWrapper.SetTrace(blockNum == uint64(traceBlock))
 		}
 		writeWrapper := state.NewNoopWriter()
-		txNum++ // Pre block transaction
 		getHeader := func(hash common.Hash, number uint64) *types.Header {
 			h, err := blockReader.Header(ctx, historyTx, hash, number)
 			if err != nil {
@@ -220,24 +221,33 @@ func History22(genesis *core.Genesis, logger log.Logger) error {
 	return nil
 }
 
-func runHistory22(trace bool, blockNum, txNumStart uint64, hw *state.HistoryReader22, ww state.StateWriter, chainConfig *params.ChainConfig, getHeader func(hash common.Hash, number uint64) *types.Header, block *types.Block, vmConfig vm.Config) (uint64, types.Receipts, error) {
+func runHistory22(trace bool, blockNum, txNumStart uint64, hw *state.HistoryReader23, ww state.StateWriter, chainConfig *params.ChainConfig, getHeader func(hash common.Hash, number uint64) *types.Header, block *types.Block, vmConfig vm.Config) (uint64, types.Receipts, error) {
 	header := block.Header()
 	vmConfig.TraceJumpDest = true
 	engine := ethash.NewFullFaker()
 	gp := new(core.GasPool).AddGas(block.GasLimit())
 	usedGas := new(uint64)
 	var receipts types.Receipts
-	daoBlock := chainConfig.DAOForkSupport && chainConfig.DAOForkBlock != nil && chainConfig.DAOForkBlock.Cmp(block.Number()) == 0
+	rules := chainConfig.Rules(block.NumberU64())
 	txNum := txNumStart
+	hw.SetTxNum(txNum)
+	daoFork := chainConfig.DAOForkSupport && chainConfig.DAOForkBlock != nil && chainConfig.DAOForkBlock.Cmp(block.Number()) == 0
+	if daoFork {
+		ibs := state.New(hw)
+		misc.ApplyDAOHardFork(ibs)
+		if err := ibs.FinalizeTx(rules, ww); err != nil {
+			return 0, nil, err
+		}
+		if err := hw.FinishTx(); err != nil {
+			return 0, nil, fmt.Errorf("finish dao fork failed: %w", err)
+		}
+	}
+	txNum++ // Pre block transaction
 	for i, tx := range block.Transactions() {
 		hw.SetTxNum(txNum)
 		ibs := state.New(hw)
-		if daoBlock {
-			misc.ApplyDAOHardFork(ibs)
-			daoBlock = false
-		}
 		ibs.Prepare(tx.Hash(), block.Hash(), i)
-		receipt, _, err := core.ApplyTransaction(chainConfig, getHeader, engine, nil, gp, ibs, ww, header, tx, usedGas, vmConfig, nil)
+		receipt, _, err := core.ApplyTransaction(chainConfig, core.GetHashFn(header, getHeader), engine, nil, gp, ibs, ww, header, tx, usedGas, vmConfig)
 		if err != nil {
 			return 0, nil, fmt.Errorf("could not apply tx %d [%x] failed: %w", i, tx.Hash(), err)
 		}

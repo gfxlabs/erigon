@@ -3,12 +3,10 @@ package commands
 import (
 	"context"
 	"fmt"
-	"sort"
 
 	"github.com/RoaringBitmap/roaring/roaring64"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/ledgerwatch/erigon-lib/kv"
-
 	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/consensus/ethash"
@@ -19,6 +17,7 @@ import (
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/rpc"
+	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 	"github.com/ledgerwatch/erigon/turbo/shards"
 	"github.com/ledgerwatch/erigon/turbo/transactions"
 )
@@ -128,7 +127,7 @@ func (api *TraceAPIImpl) Block(ctx context.Context, blockNr rpc.BlockNumber) (Pa
 		return nil, err
 	}
 	defer tx.Rollback()
-	blockNum, err := getBlockNumber(blockNr, tx)
+	blockNum, hash, _, err := rpchelper.GetBlockNumber(rpc.BlockNumberOrHashWithNumber(blockNr), tx, api.filters)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +144,6 @@ func (api *TraceAPIImpl) Block(ctx context.Context, blockNr rpc.BlockNumber) (Pa
 	if block == nil {
 		return nil, fmt.Errorf("could not find block %d", uint64(bn))
 	}
-	hash := block.Hash()
 
 	parentNr := bn
 	if parentNr > 0 {
@@ -215,7 +213,6 @@ func (api *TraceAPIImpl) Block(ctx context.Context, blockNr rpc.BlockNumber) (Pa
 func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, stream *jsoniter.Stream) error {
 	dbtx, err1 := api.kv.BeginRo(ctx)
 	if err1 != nil {
-		stream.WriteNil()
 		return fmt.Errorf("traceFilter cannot open tx: %w", err1)
 	}
 	defer dbtx.Rollback()
@@ -237,12 +234,11 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 
 	var fromTxNum, toTxNum uint64
 	if fromBlock > 0 {
-		fromTxNum = api._txNums[fromBlock-1]
+		fromTxNum = api._txNums.MinOf(fromBlock)
 	}
-	toTxNum = api._txNums[toBlock] // toBlock is an inclusive bound
+	toTxNum = api._txNums.MaxOf(toBlock) // toBlock is an inclusive bound
 
 	if fromBlock > toBlock {
-		stream.WriteNil()
 		return fmt.Errorf("invalid parameters: fromBlock cannot be greater than toBlock")
 	}
 
@@ -253,10 +249,11 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 		allTxs roaring64.Bitmap
 		txsTo  roaring64.Bitmap
 	)
+	ac := api._agg.MakeContext()
 
 	for _, addr := range req.FromAddress {
 		if addr != nil {
-			it := api._agg.TraceFromIterator(addr.Bytes(), fromTxNum, toTxNum, nil)
+			it := ac.TraceFromIterator(addr.Bytes(), fromTxNum, toTxNum, nil)
 			for it.HasNext() {
 				allTxs.Add(it.Next())
 			}
@@ -266,7 +263,7 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 
 	for _, addr := range req.ToAddress {
 		if addr != nil {
-			it := api._agg.TraceToIterator(addr.Bytes(), fromTxNum, toTxNum, nil)
+			it := ac.TraceToIterator(addr.Bytes(), fromTxNum, toTxNum, nil)
 			for it.HasNext() {
 				txsTo.Add(it.Next())
 			}
@@ -293,7 +290,6 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 
 	chainConfig, err := api.chainConfig(dbtx)
 	if err != nil {
-		stream.WriteNil()
 		return err
 	}
 
@@ -319,29 +315,44 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 	var lastHeader *types.Header
 	var lastSigner *types.Signer
 	var lastRules *params.Rules
-	stateReader := state.NewHistoryReader22(api._agg, nil /* ReadIndices */)
+	stateReader := state.NewHistoryReader23(ac, nil /* ReadIndices */)
 	noop := state.NewNoopWriter()
 	for it.HasNext() {
-		txNum := uint64(it.Next())
+		txNum := it.Next()
 		// Find block number
-		blockNum := uint64(sort.Search(len(api._txNums), func(i int) bool {
-			return api._txNums[i] > txNum
-		}))
+		ok, blockNum := api._txNums.Find(txNum)
+		if !ok {
+			return nil
+		}
 		if blockNum > lastBlockNum {
 			if lastHeader, err = api._blockReader.HeaderByNumber(ctx, nil, blockNum); err != nil {
-				stream.WriteNil()
-				return err
+				if first {
+					first = false
+				} else {
+					stream.WriteMore()
+				}
+				stream.WriteObjectStart()
+				rpc.HandleError(err, stream)
+				stream.WriteObjectEnd()
+				continue
 			}
 			lastBlockNum = blockNum
 			lastBlockHash = lastHeader.Hash()
 			lastSigner = types.MakeSigner(chainConfig, blockNum)
 			lastRules = chainConfig.Rules(blockNum)
 		}
-		if txNum+1 == api._txNums[blockNum] {
-			body, err := api._blockReader.Body(ctx, nil, lastBlockHash, blockNum)
+		if txNum+1 == api._txNums.MaxOf(blockNum) {
+			body, _, err := api._blockReader.Body(ctx, nil, lastBlockHash, blockNum)
 			if err != nil {
-				stream.WriteNil()
-				return err
+				if first {
+					first = false
+				} else {
+					stream.WriteMore()
+				}
+				stream.WriteObjectStart()
+				rpc.HandleError(err, stream)
+				stream.WriteObjectEnd()
+				continue
 			}
 			// Block reward section, handle specially
 			minerReward, uncleRewards := ethash.AccumulateRewards(chainConfig, lastHeader, body.Uncles)
@@ -361,8 +372,15 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 				tr.TraceAddress = []int{}
 				b, err := json.Marshal(tr)
 				if err != nil {
-					stream.WriteNil()
-					return err
+					if first {
+						first = false
+					} else {
+						stream.WriteMore()
+					}
+					stream.WriteObjectStart()
+					rpc.HandleError(err, stream)
+					stream.WriteObjectEnd()
+					continue
 				}
 				if nSeen > after && nExported < count {
 					if first {
@@ -392,8 +410,15 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 						tr.TraceAddress = []int{}
 						b, err := json.Marshal(tr)
 						if err != nil {
-							stream.WriteNil()
-							return err
+							if first {
+								first = false
+							} else {
+								stream.WriteMore()
+							}
+							stream.WriteObjectStart()
+							rpc.HandleError(err, stream)
+							stream.WriteObjectEnd()
+							continue
 						}
 						if nSeen > after && nExported < count {
 							if first {
@@ -411,23 +436,36 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 		}
 		var startTxNum uint64
 		if blockNum > 0 {
-			startTxNum = api._txNums[blockNum-1]
+			startTxNum = api._txNums.MinOf(blockNum)
 		}
 		txIndex := txNum - startTxNum - 1
 		//fmt.Printf("txNum=%d, blockNum=%d, txIndex=%d\n", txNum, blockNum, txIndex)
 		txn, err := api._txnReader.TxnByIdxInBlock(ctx, nil, blockNum, int(txIndex))
 		if err != nil {
-			stream.WriteNil()
-			return err
+			if first {
+				first = false
+			} else {
+				stream.WriteMore()
+			}
+			stream.WriteObjectStart()
+			rpc.HandleError(err, stream)
+			stream.WriteObjectEnd()
+			continue
 		}
 		txHash := txn.Hash()
 		msg, err := txn.AsMessage(*lastSigner, lastHeader.BaseFee, lastRules)
 		if err != nil {
-			stream.WriteNil()
-			return err
+			if first {
+				first = false
+			} else {
+				stream.WriteMore()
+			}
+			stream.WriteObjectStart()
+			rpc.HandleError(err, stream)
+			stream.WriteObjectEnd()
+			continue
 		}
-		contractHasTEVM := func(contractHash common.Hash) (bool, error) { return false, nil }
-		blockCtx, txCtx := transactions.GetEvmContext(msg, lastHeader, true /* requireCanonical */, dbtx, contractHasTEVM, api._blockReader)
+		blockCtx, txCtx := transactions.GetEvmContext(msg, lastHeader, true /* requireCanonical */, dbtx, api._blockReader)
 		stateReader.SetTxNum(txNum)
 		stateCache := shards.NewStateCache(32, 0 /* no limit */) // this cache living only during current RPC call, but required to store state writes
 		cachedReader := state.NewCachedReader(stateReader, stateCache)
@@ -450,17 +488,38 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 		var execResult *core.ExecutionResult
 		execResult, err = core.ApplyMessage(evm, msg, gp, true /* refunds */, false /* gasBailout */)
 		if err != nil {
-			stream.WriteNil()
-			return err
+			if first {
+				first = false
+			} else {
+				stream.WriteMore()
+			}
+			stream.WriteObjectStart()
+			rpc.HandleError(err, stream)
+			stream.WriteObjectEnd()
+			continue
 		}
 		traceResult.Output = common.CopyBytes(execResult.ReturnData)
 		if err = ibs.FinalizeTx(evm.ChainRules(), noop); err != nil {
-			stream.WriteNil()
-			return err
+			if first {
+				first = false
+			} else {
+				stream.WriteMore()
+			}
+			stream.WriteObjectStart()
+			rpc.HandleError(err, stream)
+			stream.WriteObjectEnd()
+			continue
 		}
 		if err = ibs.CommitBlock(evm.ChainRules(), cachedWriter); err != nil {
-			stream.WriteNil()
-			return err
+			if first {
+				first = false
+			} else {
+				stream.WriteMore()
+			}
+			stream.WriteObjectStart()
+			rpc.HandleError(err, stream)
+			stream.WriteObjectEnd()
+			continue
 		}
 		for _, pt := range traceResult.Trace {
 			if includeAll || filter_trace(pt, fromAddresses, toAddresses) {
@@ -471,8 +530,15 @@ func (api *TraceAPIImpl) Filter(ctx context.Context, req TraceFilterRequest, str
 				pt.TransactionPosition = &txIndex
 				b, err := json.Marshal(pt)
 				if err != nil {
-					stream.WriteNil()
-					return err
+					if first {
+						first = false
+					} else {
+						stream.WriteMore()
+					}
+					stream.WriteObjectStart()
+					rpc.HandleError(err, stream)
+					stream.WriteObjectEnd()
+					continue
 				}
 				if nSeen > after && nExported < count {
 					if first {
