@@ -7,6 +7,10 @@ import (
 	"reflect"
 	"sync"
 
+<<<<<<< HEAD
+=======
+	"gfx.cafe/util/go/bufpool"
+>>>>>>> 9f6fd488d2751dff4ce160e08cb35fb9ec6ac840
 	ssz "github.com/ferranbt/fastssz"
 	"github.com/golang/snappy"
 	"github.com/ledgerwatch/erigon/cmd/lightclient/sentinel/proto"
