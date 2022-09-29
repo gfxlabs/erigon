@@ -57,6 +57,8 @@ func curryStreamHandler[T proto.Packet](newcodec func(network.Stream) proto.Stre
 	return func(s network.Stream) {
 		setDeadLines(s)
 		sd := newcodec(s)
+		// so go-critic doesn't understand *new(T) and tries to have you "correct" it to (T)(nil), which does not work
+		// this works though, but it's two lines, so that's sad. this comment will make it four until it's fixed, i guess.
 		var t T
 		val := t.Clone().(T)
 		ctx, err := sd.Decode(val)
