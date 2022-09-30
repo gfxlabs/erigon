@@ -47,7 +47,7 @@ func (s *Sentinel) pingRequest() {
 	if err != nil {
 		log.Warn("fail read response code", "err", err)
 	}
-	if code == 0 {
+	if code == 1 {
 		pctx, err := sc.Decode(rping)
 		if err != nil {
 			log.Warn("fail decode ping response", "err", err, "got", hex.EncodeToString(pctx.Raw))
