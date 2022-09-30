@@ -204,7 +204,7 @@ func (s *Sentinel) Start() error {
 	}
 	go func() {
 		for {
-			time.Sleep(3 * time.Second)
+			time.Sleep(1 * time.Second)
 			s.pingRequest()
 		}
 	}()

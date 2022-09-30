@@ -1,8 +1,10 @@
 package sentinel
 
 import (
-	"encoding/hex"
+	"context"
+	"time"
 
+	"github.com/ledgerwatch/erigon/cmd/lightclient/sentinel/proto"
 	"github.com/ledgerwatch/erigon/cmd/lightclient/sentinel/proto/p2p"
 	"github.com/ledgerwatch/erigon/cmd/lightclient/sentinel/proto/ssz_snappy"
 	"github.com/ledgerwatch/log/v3"
@@ -11,7 +13,7 @@ import (
 
 func (s *Sentinel) pingRequest() {
 	pingPacket := &p2p.Ping{
-		Id: uint64(1),
+		Id: uint64(134),
 	}
 
 	_, peerInfo, err := connectToRandomPeer(s)
@@ -19,8 +21,9 @@ func (s *Sentinel) pingRequest() {
 		log.Warn("Failed to ping request", "err", err)
 		return
 	}
-
-	stream, err := s.host.NewStream(s.ctx, peerInfo.ID, protocol.ID(ProtocolPrefix+"/ping/1/ssz_snappy"))
+	ctx, cn := context.WithTimeout(s.ctx, 3*time.Second)
+	defer cn()
+	stream, err := s.host.NewStream(ctx, peerInfo.ID, protocol.ID(ProtocolPrefix+"/ping/1/ssz_snappy"))
 	if err != nil {
 		log.Warn("failed to create stream to send ping request", "err", err)
 		return
@@ -36,23 +39,30 @@ func (s *Sentinel) pingRequest() {
 		log.Warn("wrong ping packet size")
 		return
 	}
-	err = stream.CloseWrite()
-	if err != nil {
-		log.Warn("fail close ping request write ", "err", err)
-	}
 	log.Info("[Req] sent ping request", "peer", peerInfo.ID)
-	rping := &p2p.Ping{}
-
 	code, err := sc.ReadByte()
 	if err != nil {
 		log.Warn("fail read response code", "err", err)
+		return
 	}
-	if code == 1 {
+	switch code {
+	case 0:
+		rping := &p2p.Ping{}
 		pctx, err := sc.Decode(rping)
 		if err != nil {
-			log.Warn("fail decode ping response", "err", err, "got", hex.EncodeToString(pctx.Raw))
+			log.Warn("fail ping success", "err", err, "got", string(pctx.Raw))
 			return
 		}
+		log.Info("[Resp] ping success", "peer", peerInfo.ID, "code", code, "pong", rping.Id)
+	case 1, 2, 3:
+		errm := &proto.ErrorMessage{}
+		pctx, err := sc.Decode(errm)
+		if err != nil {
+			log.Warn("fail decode ping error", "err", err, "got", string(pctx.Raw))
+			return
+		}
+		log.Info("[Resp] ping error ", "peer", peerInfo.ID, "code", code, "msg", string(errm.Message))
+	default:
+		log.Info("[Resp] ping unknown code", "peer", peerInfo.ID, "code", code)
 	}
-	log.Info("[Resp] received ping response", "peer", peerInfo.ID, "code", code, "pong", rping.Id)
 }

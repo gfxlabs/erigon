@@ -70,3 +70,17 @@ type EmptyPacket struct{}
 func (e *EmptyPacket) Clone() Packet {
 	return &EmptyPacket{}
 }
+
+// the error message skips decoding but does do the decompression.
+type ErrorMessage struct {
+	Message []byte `json:"message"`
+}
+
+func (typ *ErrorMessage) Clone() Packet {
+	return &ErrorMessage{}
+}
+
+func (typ *ErrorMessage) UnmarshalSSZ(buf []byte) error {
+	typ.Message = buf
+	return nil
+}

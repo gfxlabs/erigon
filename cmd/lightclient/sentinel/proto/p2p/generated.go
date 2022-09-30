@@ -63,9 +63,9 @@ type BeaconBlockAltair struct {
 
 	ProposerIndex uint64 `json:"proposer_index" `
 
-	ParentRoot Root `json:"parent_root" ssz-size:"32" `
+	ParentRoot Root `ssz-size:"32" json:"parent_root" `
 
-	StateRoot Root `ssz-size:"32" json:"state_root" `
+	StateRoot Root `json:"state_root" ssz-size:"32" `
 
 	Body BeaconBlockBodyAltair `json:"body" `
 }
@@ -79,7 +79,7 @@ type BeaconBlockBellatrix struct {
 
 	ProposerIndex uint64 `json:"proposer_index" `
 
-	ParentRoot Root `json:"parent_root" ssz-size:"32" `
+	ParentRoot Root `ssz-size:"32" json:"parent_root" `
 
 	StateRoot Root `json:"state_root" ssz-size:"32" `
 
@@ -101,7 +101,7 @@ type BeaconBlockBodyAltair struct {
 
 	AttesterSlashings []*AttesterSlashing `json:"attester_slashings" ssz-max:"2" `
 
-	Attestations []*Attestation `json:"attestations" ssz-max:"128" `
+	Attestations []*Attestation `ssz-max:"128" json:"attestations" `
 
 	Deposits []*Deposit `json:"deposits" ssz-max:"16" `
 
@@ -179,11 +179,11 @@ func (typ *Deposit) Clone() proto.Packet {
 type DepositData struct {
 	Pubkey [48]byte `json:"pubkey" ssz-size:"48" `
 
-	WithdrawalCredentials [32]byte `json:"withdrawal_credentials" ssz-size:"32" `
+	WithdrawalCredentials [32]byte `ssz-size:"32" json:"withdrawal_credentials" `
 
 	Amount uint64 `json:"amount" `
 
-	Signature Signature `ssz-size:"96" json:"signature" `
+	Signature Signature `json:"signature" ssz-size:"96" `
 
 	Root [32]byte `ssz:"-" `
 }
@@ -221,7 +221,7 @@ type ExecutionPayload struct {
 
 	FeeRecipient [20]byte `ssz-size:"20" json:"fee_recipient" `
 
-	StateRoot [32]byte `json:"state_root" ssz-size:"32" `
+	StateRoot [32]byte `ssz-size:"32" json:"state_root" `
 
 	ReceiptsRoot [32]byte `ssz-size:"32" json:"receipts_root" `
 
@@ -371,7 +371,7 @@ func (typ *ProposerSlashing) Clone() proto.Packet {
 type SignedBeaconBlockAltair struct {
 	Block BeaconBlockAltair `json:"message" `
 
-	Signature Signature `ssz-size:"96" json:"signature" `
+	Signature Signature `json:"signature" ssz-size:"96" `
 }
 
 func (typ *SignedBeaconBlockAltair) Clone() proto.Packet {
@@ -381,7 +381,7 @@ func (typ *SignedBeaconBlockAltair) Clone() proto.Packet {
 type SignedBeaconBlockBellatrix struct {
 	Block BeaconBlockBellatrix `json:"message" `
 
-	Signature Signature `ssz-size:"96" json:"signature" `
+	Signature Signature `json:"signature" ssz-size:"96" `
 }
 
 func (typ *SignedBeaconBlockBellatrix) Clone() proto.Packet {
@@ -391,7 +391,7 @@ func (typ *SignedBeaconBlockBellatrix) Clone() proto.Packet {
 type SignedBeaconBlockHeader struct {
 	Header BeaconBlockHeader `json:"message" `
 
-	Signature Signature `json:"signature" ssz-size:"96" `
+	Signature Signature `ssz-size:"96" json:"signature" `
 }
 
 func (typ *SignedBeaconBlockHeader) Clone() proto.Packet {
@@ -417,7 +417,7 @@ func (typ *SingleRoot) Clone() proto.Packet {
 }
 
 type Status struct {
-	ForkDigest Bytea `json:"fork_digest,omitempty" ssz-size:"4" `
+	ForkDigest Bytea `ssz-size:"4" json:"fork_digest,omitempty" `
 
 	FinalizedRoot Bytea `json:"finalized_root,omitempty" ssz-size:"32" `
 
