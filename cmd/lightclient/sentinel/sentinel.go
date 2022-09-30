@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/ledgerwatch/erigon/cmd/lightclient/lightclient"
 	"github.com/ledgerwatch/erigon/cmd/lightclient/sentinel/peers"
@@ -201,6 +202,12 @@ func (s *Sentinel) Start() error {
 	if err := s.startGossip(prefix); err != nil {
 		return fmt.Errorf("failed to start gossip err=%w", err)
 	}
+	go func() {
+		for {
+			time.Sleep(3 * time.Second)
+			s.pingRequest()
+		}
+	}()
 
 	return nil
 }

@@ -48,11 +48,16 @@ type StreamCodec interface {
 	Write(payload []byte) (n int, err error)
 	WritePacket(pck Packet) (n int, err error)
 	Decode(Packet) (ctx *StreamContext, err error)
+
+	Read(payload []byte) (n int, err error)
+	ReadByte() (b byte, err error)
 }
 
 // SubCodec describes a wire format for pubsub messages
 type SubCodec interface {
 	Decode(context.Context, Packet) (*SubContext, error)
+
+	Read(payload []byte) (n int, err error)
 }
 
 func (c *SubContext) String() string {

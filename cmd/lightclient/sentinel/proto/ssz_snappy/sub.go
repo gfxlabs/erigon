@@ -30,6 +30,11 @@ func (d *SubCodec) Decode(ctx context.Context, p proto.Packet) (sctx *proto.SubC
 	return
 }
 
+// read raw bytes to stream
+func (d *SubCodec) Read(b []byte) (n int, err error) {
+	return d.Read(b)
+}
+
 func (d *SubCodec) readPacket(ctx context.Context, p proto.Packet) (*proto.SubContext, error) {
 	c := &proto.SubContext{
 		Packet: p,

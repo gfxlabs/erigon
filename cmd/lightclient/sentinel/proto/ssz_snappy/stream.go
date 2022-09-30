@@ -64,6 +64,21 @@ func (d *StreamCodec) Write(payload []byte) (n int, err error) {
 	return d.s.Write(payload)
 }
 
+// read raw bytes to stream
+func (d *StreamCodec) Read(b []byte) (n int, err error) {
+	return d.s.Read(b)
+}
+
+// read raw bytes to stream
+func (d *StreamCodec) ReadByte() (b byte, err error) {
+	o := [1]byte{}
+	_, err = io.ReadFull(d.s, o[:])
+	if err != nil {
+		return
+	}
+	return o[0], nil
+}
+
 // decode into packet p, then return the packet context
 func (d *StreamCodec) Decode(p proto.Packet) (ctx *proto.StreamContext, err error) {
 	ctx, err = d.readPacket(p)
