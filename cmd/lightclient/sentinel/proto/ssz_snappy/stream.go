@@ -56,7 +56,7 @@ func (d *StreamCodec) WritePacket(pkt proto.Packet) (n int, err error) {
 		}
 		return n, nil
 	}
-	return nil, fmt.Errorf("packet %s does not implement ssz.Marshaler", reflect.TypeOf(pkt))
+	return 0, fmt.Errorf("packet %s does not implement ssz.Marshaler", reflect.TypeOf(pkt))
 }
 
 // write raw bytes to stream
